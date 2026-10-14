@@ -1,0 +1,24 @@
+{
+  "id": "iwara-tv",
+  "name": "Iwara",
+  "version": "1.2.0",
+  "apiVersion": 6,
+  "entry": "plugin.js",
+  "description": "Videos de iwara.tv. Búsqueda, Inicio (tendencias, recientes, populares) y reproducción.",
+  "author": "comunidad",
+  "discoverable": false,
+  "hosts": [
+    "api.iwara.tv",
+    "files.iwara.tv",
+    "i.iwara.tv",
+    "www.iwara.tv",
+    "*.iwara.tv"
+  ],
+  "capabilities": ["search", "home", "browse", "resolve"],
+  "categories": ["anime", "adult"],
+  "color": "#7B2CBF",
+  "theme": {
+    "accent": "#7B2CBF",
+    "onAccent": "#FFFFFF"
+  }
+}
