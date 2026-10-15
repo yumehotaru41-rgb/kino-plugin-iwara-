@@ -38,6 +38,10 @@ function tokenKey() {
   return "token:" + String(cfg("email", "")).toLowerCase();
 }
 
+function userIdKey() {
+  return "userid:" + String(cfg("email", "")).toLowerCase();
+}
+
 /** Login if needed; returns Bearer token or null when no credentials. */
 async function getToken() {
   if (!hasCredentials()) return null;
@@ -59,6 +63,7 @@ async function getToken() {
 
   if (r.status === 401 || r.status === 400) {
     kino.storage.remove(key);
+    kino.storage.remove(userIdKey());
     throw kino.error("auth_required", "usuario o contraseña incorrectos");
   }
   if (!r.ok) {
@@ -78,6 +83,27 @@ async function getToken() {
   }
 
   kino.storage.set(key, token);
+
+  // Cache user id from JWT payload when present
+  try {
+    const parts = String(token).split(".");
+    if (parts.length >= 2) {
+      const b64 = parts[1].replace(/-/g, "+").replace(/_/g, "/");
+      const pad = b64.length % 4 === 0 ? b64 : b64 + "===".slice(0, 4 - (b64.length % 4));
+      // atob may not exist in QuickJS; use a minimal base64 decode via kino if available, else skip
+      let json = null;
+      try {
+        if (typeof atob === "function") {
+          json = JSON.parse(atob(pad));
+        }
+      } catch (_) {}
+      if (json) {
+        const uid = json.userId || json.user_id || json.sub || json.id;
+        if (uid) kino.storage.set(userIdKey(), String(uid));
+      }
+    }
+  } catch (_) {}
+
   return token;
 }
 
@@ -132,6 +158,33 @@ async function apiGet(path, params, { requireAuth = false } = {}) {
   return r.json();
 }
 
+/** Resolve logged-in user id (cached). */
+async function getSelfUserId() {
+  const cached = kino.storage.get(userIdKey());
+  if (cached) return cached;
+
+  if (!hasCredentials()) return null;
+
+  // Prefer profile by username when the setting looks like a handle
+  const login = String(cfg("email", "")).trim();
+  if (USERNAME_RE.test(login) && !login.includes("@")) {
+    try {
+      const profile = await apiGet("/profile/" + encodeURIComponent(login), null, {
+        requireAuth: true,
+      });
+      const id = profile && profile.user && profile.user.id;
+      if (id) {
+        kino.storage.set(userIdKey(), String(id));
+        return String(id);
+      }
+    } catch (e) {
+      log("getSelfUserId profile", e.message || e);
+    }
+  }
+
+  return null;
+}
+
 function posterOf(item) {
   const file = item.file || item;
   const id = file.id || file.fileId;
@@ -140,6 +193,8 @@ function posterOf(item) {
 }
 
 function toItem(v) {
+  // Favorites API may wrap as { video: {...} }
+  if (v && v.video && !v.id) v = v.video;
   if (!v || !v.id) return null;
   const user = v.user || {};
   const year = v.createdAt ? String(v.createdAt).slice(0, 4) : undefined;
@@ -194,6 +249,42 @@ async function videosByUser(userId, page, limit) {
   return next ? { items, next } : items;
 }
 
+/** Favorites of the logged-in account. */
+async function listFavorites(page, limit) {
+  const data = await apiGet(
+    "/favorites/videos",
+    { page, limit },
+    { requireAuth: true }
+  );
+  const results = data.results || [];
+  const items = results.map(toItem).filter(Boolean);
+  const next = results.length >= limit ? pageCursor(page) : undefined;
+  return next ? { items, next } : items;
+}
+
+/** Playlists of a user. */
+async function listPlaylists(userId, page, limit) {
+  const data = await apiGet(
+    "/playlists",
+    { user: userId, page, limit },
+    { requireAuth: true }
+  );
+  return data.results || [];
+}
+
+/** Videos inside a playlist. */
+async function listPlaylistVideos(playlistId, page, limit) {
+  const data = await apiGet(
+    "/playlist/" + encodeURIComponent(playlistId),
+    { page, limit },
+    { requireAuth: false }
+  );
+  const results = data.results || [];
+  const items = results.map(toItem).filter(Boolean);
+  const next = results.length >= limit ? pageCursor(page) : undefined;
+  return next ? { items, next } : items;
+}
+
 function parseQuery(raw) {
   const q = String(raw || "").trim();
   if (!q) return { mode: "empty" };
@@ -203,6 +294,9 @@ function parseQuery(raw) {
 
   m = q.match(/iwara\.(?:tv|ai)\/profile\/([a-zA-Z0-9._-]+)/i);
   if (m) return { mode: "user", username: m[1] };
+
+  m = q.match(/iwara\.(?:tv|ai)\/playlist\/([a-zA-Z0-9]+)/i);
+  if (m) return { mode: "playlist", id: m[1] };
 
   m = q.match(/^(?:user|artist|author|uploader)\s*:\s*(.+)$/i);
   if (m) return { mode: "user", username: m[1].trim() };
@@ -256,6 +350,7 @@ export async function action(key) {
   if (key === "logout") {
     try {
       kino.storage.remove(tokenKey());
+      kino.storage.remove(userIdKey());
     } catch (_) {}
     return {
       message: "Sesión cerrada",
@@ -275,6 +370,10 @@ export async function search(query) {
   const limit = 24;
   const sort = cfg("sort", "relevance");
   const parsed = parseQuery(raw);
+
+  if (parsed.mode === "playlist") {
+    return listPlaylistVideos(parsed.id, page, limit);
+  }
 
   if (parsed.mode === "video" && page === 0) {
     try {
@@ -345,6 +444,7 @@ export async function home() {
   const rows = [];
 
   if (hasCredentials()) {
+    // Suscripciones
     try {
       const items = await listVideos({ sort: "date", subscribed: "true" });
       if (items.length) {
@@ -357,6 +457,49 @@ export async function home() {
       }
     } catch (e) {
       log("home subscribed", e.message || e);
+    }
+
+    // Favoritos
+    try {
+      const fav = await listFavorites(0, 20);
+      const items = Array.isArray(fav) ? fav : fav.items || [];
+      if (items.length) {
+        rows.push({
+          id: "favorites",
+          title: "Tus favoritos",
+          items,
+          ref: "favorites",
+        });
+      }
+    } catch (e) {
+      log("home favorites", e.message || e);
+    }
+
+    // Playlists propias (hasta 4 filas)
+    try {
+      const uid = await getSelfUserId();
+      if (uid) {
+        const playlists = await listPlaylists(uid, 0, 8);
+        for (const pl of playlists.slice(0, 4)) {
+          if (!pl || !pl.id) continue;
+          try {
+            const vids = await listPlaylistVideos(pl.id, 0, 16);
+            const items = Array.isArray(vids) ? vids : vids.items || [];
+            if (items.length) {
+              rows.push({
+                id: "playlist-" + pl.id,
+                title: String(pl.title || pl.name || "Playlist").slice(0, 60),
+                items,
+                ref: "playlist:" + pl.id,
+              });
+            }
+          } catch (e) {
+            log("home playlist", pl.id, e.message || e);
+          }
+        }
+      }
+    } catch (e) {
+      log("home playlists", e.message || e);
     }
   }
 
@@ -387,16 +530,35 @@ export async function home() {
 
 export async function browse(ref, cursor) {
   const page = cursor ? parseInt(cursor, 10) || 0 : 0;
+  const limit = 24;
+
+  if (ref === "favorites") {
+    return listFavorites(page, limit);
+  }
+
+  if (ref === "subscribed") {
+    const data = await apiGet(
+      "/videos",
+      { subscribed: "true", sort: "date", rating: "all", page, limit },
+      { requireAuth: true }
+    );
+    const results = data.results || [];
+    const items = results.map(toItem).filter(Boolean);
+    const next = results.length >= limit ? pageCursor(page) : undefined;
+    return next ? { items, next } : items;
+  }
+
+  if (ref && ref.startsWith("playlist:")) {
+    return listPlaylistVideos(ref.slice(9), page, limit);
+  }
+
   const params = {
     rating: "all",
     page,
-    limit: 24,
+    limit,
   };
 
-  if (ref === "subscribed") {
-    params.subscribed = "true";
-    params.sort = "date";
-  } else if (ref && ref.startsWith("sort:")) {
+  if (ref && ref.startsWith("sort:")) {
     params.sort = ref.slice(5);
   } else if (ref && ref.startsWith("user:")) {
     params.user = ref.slice(5);
@@ -408,13 +570,11 @@ export async function browse(ref, cursor) {
     params.sort = "date";
   }
 
-  const data = await apiGet("/videos", params, {
-    requireAuth: ref === "subscribed",
-  });
+  const data = await apiGet("/videos", params);
   const results = data.results || [];
   const items = results.map(toItem).filter(Boolean);
-  const next = results.length >= 24 ? pageCursor(page) : undefined;
-  return { items, next };
+  const next = results.length >= limit ? pageCursor(page) : undefined;
+  return next ? { items, next } : items;
 }
 
 export async function resolve(ref) {

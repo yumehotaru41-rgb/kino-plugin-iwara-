@@ -1,10 +1,10 @@
 {
   "id": "iwara-tv",
   "name": "Iwara",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "apiVersion": 6,
   "entry": "plugin.js",
-  "description": "Videos de iwara.tv. Búsqueda por título, artista o tag, Inicio, calidad configurable, descargas y sesión opcional para vídeos privados y suscripciones.",
+  "description": "Videos de iwara.tv. Búsqueda por título, artista o tag, Inicio, calidad configurable y sesión opcional para privados, suscripciones, favoritos y playlists.",
   "author": "comunidad",
   "homepage": "https://github.com/yumehotaru41-rgb/kino-plugin-iwara-",
   "icon": "icon.png",
@@ -16,7 +16,7 @@
     "www.iwara.tv",
     "*.iwara.tv"
   ],
-  "capabilities": ["search", "home", "browse", "resolve", "download"],
+  "capabilities": ["search", "home", "browse", "resolve"],
   "categories": ["anime", "adult"],
   "color": "#7B2CBF",
   "theme": {
@@ -28,7 +28,7 @@
       "key": "cuenta",
       "label": "Cuenta de Iwara",
       "type": "section",
-      "hint": "Opcional. Sin cuenta ves el catálogo público. Con usuario y contraseña puedes abrir vídeos privados y ver tus suscripciones en Inicio."
+      "hint": "Opcional. Sin cuenta ves el catálogo público. Con usuario y contraseña: vídeos privados, suscripciones, favoritos y playlists en Inicio."
     },
     {
       "key": "email",
