@@ -8,7 +8,7 @@
   "author": "comunidad",
   "homepage": "https://github.com/yumehotaru41-rgb/kino-plugin-iwara-",
   "icon": "icon.png",
-  "discoverable": false,
+  "discoverable": true,
   "hosts": [
     "api.iwara.tv",
     "files.iwara.tv",
