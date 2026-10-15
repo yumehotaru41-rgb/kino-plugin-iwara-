@@ -6,6 +6,7 @@ const SITE = "https://www.iwara.tv";
 
 const X_VERSION_KEY = "mSvL05GfEmeEmsEYfGCnVpEjYgTJraJN";
 const VIDEO_ID_RE = /^[a-zA-Z0-9]{8,}$/;
+const USERNAME_RE = /^[a-zA-Z0-9._-]{2,40}$/;
 
 const HEADERS = {
   Accept: "application/json, text/plain, */*",
@@ -20,7 +21,85 @@ function log(...args) {
   } catch (_) {}
 }
 
-async function apiGet(path, params) {
+function cfg(key, fallback) {
+  try {
+    const v = kino.config.get(key);
+    return v != null && v !== "" ? v : fallback;
+  } catch (_) {
+    return fallback;
+  }
+}
+
+function hasCredentials() {
+  return !!(cfg("email") && cfg("password"));
+}
+
+function tokenKey() {
+  return "token:" + String(cfg("email", "")).toLowerCase();
+}
+
+/** Login if needed; returns Bearer token or null when no credentials. */
+async function getToken() {
+  if (!hasCredentials()) return null;
+
+  const key = tokenKey();
+  const saved = kino.storage.get(key);
+  if (saved) return saved;
+
+  const r = await kino.fetch(API + "/user/login", {
+    method: "POST",
+    headers: { ...HEADERS, "Content-Type": "application/json" },
+    body: {
+      json: {
+        email: cfg("email"),
+        password: cfg("password"),
+      },
+    },
+  });
+
+  if (r.status === 401 || r.status === 400) {
+    kino.storage.remove(key);
+    throw kino.error("auth_required", "usuario o contraseña incorrectos");
+  }
+  if (!r.ok) {
+    throw kino.error("unavailable", "Iwara login respondió " + r.status);
+  }
+
+  let data;
+  try {
+    data = r.json();
+  } catch (_) {
+    throw kino.error("unavailable", "Respuesta de login inválida");
+  }
+
+  const token = data && data.token;
+  if (!token) {
+    throw kino.error("auth_required", "usuario o contraseña incorrectos");
+  }
+
+  kino.storage.set(key, token);
+  return token;
+}
+
+function authHeaders(token) {
+  const h = { ...HEADERS };
+  if (token) h.Authorization = "Bearer " + token;
+  return h;
+}
+
+async function apiGet(path, params, { requireAuth = false } = {}) {
+  let token = null;
+  try {
+    token = await getToken();
+  } catch (e) {
+    if (requireAuth) throw e;
+    token = null;
+  }
+
+  if (requireAuth && !token) {
+    throw kino.error("auth_required", "Configura tu cuenta de Iwara en Ajustes");
+  }
+
   let url = API + path;
   if (params) {
     const q = Object.entries(params)
@@ -29,10 +108,25 @@ async function apiGet(path, params) {
       .join("&");
     if (q) url += "?" + q;
   }
-  const r = await kino.fetch(url, { headers: HEADERS });
+
+  let r = await kino.fetch(url, { headers: authHeaders(token) });
+
+  if (r.status === 401 && token && hasCredentials()) {
+    kino.storage.remove(tokenKey());
+    try {
+      token = await getToken();
+    } catch (e) {
+      if (requireAuth) throw e;
+      token = null;
+    }
+    r = await kino.fetch(url, { headers: authHeaders(token) });
+  }
+
   if (!r.ok) {
     if (r.status === 404) throw kino.error("not_found", "No encontrado");
-    if (r.status === 403) throw kino.error("auth_required", "Se necesita iniciar sesión");
+    if (r.status === 401 || r.status === 403) {
+      throw kino.error("auth_required", "Se necesita iniciar sesión");
+    }
     throw kino.error("unavailable", "Iwara respondió " + r.status);
   }
   return r.json();
@@ -49,6 +143,9 @@ function toItem(v) {
   if (!v || !v.id) return null;
   const user = v.user || {};
   const year = v.createdAt ? String(v.createdAt).slice(0, 4) : undefined;
+  const badges = [];
+  if (user.name) badges.push(String(user.name).slice(0, 40));
+  if (v.file && v.file.height) badges.push(String(v.file.height) + "p");
   return {
     id: v.id,
     ref: v.id,
@@ -58,7 +155,7 @@ function toItem(v) {
     poster: posterOf(v),
     overview: v.body ? String(v.body).replace(/<[^>]+>/g, "").slice(0, 400) : undefined,
     adult: v.rating === "ecchi",
-    badges: user.name ? [String(user.name).slice(0, 40)] : undefined,
+    badges: badges.length ? badges : undefined,
   };
 }
 
@@ -76,20 +173,112 @@ async function listVideos(params) {
   return (data.results || []).map(toItem).filter(Boolean);
 }
 
+async function resolveUserId(username) {
+  const profile = await apiGet("/profile/" + encodeURIComponent(username));
+  const user = profile && profile.user;
+  if (!user || !user.id) return null;
+  return { id: user.id, name: user.name || username, username: user.username || username };
+}
+
+async function videosByUser(userId, page, limit) {
+  const data = await apiGet("/videos", {
+    user: userId,
+    sort: "date",
+    rating: "all",
+    page,
+    limit,
+  });
+  const results = data.results || [];
+  const items = results.map(toItem).filter(Boolean);
+  const next = results.length >= limit ? pageCursor(page) : undefined;
+  return next ? { items, next } : items;
+}
+
+function parseQuery(raw) {
+  const q = String(raw || "").trim();
+  if (!q) return { mode: "empty" };
+
+  let m = q.match(/iwara\.(?:tv|ai)\/video\/([a-zA-Z0-9]+)/i);
+  if (m) return { mode: "video", id: m[1] };
+
+  m = q.match(/iwara\.(?:tv|ai)\/profile\/([a-zA-Z0-9._-]+)/i);
+  if (m) return { mode: "user", username: m[1] };
+
+  m = q.match(/^(?:user|artist|author|uploader)\s*:\s*(.+)$/i);
+  if (m) return { mode: "user", username: m[1].trim() };
+  if (q.startsWith("@")) {
+    const u = q.slice(1).trim();
+    if (u) return { mode: "user", username: u };
+  }
+
+  m = q.match(/^tag\s*:\s*(.+)$/i);
+  if (m) return { mode: "tag", tag: m[1].trim().replace(/\s+/g, "_").toLowerCase() };
+  if (q.startsWith("#")) {
+    const tag = q
+      .slice(1)
+      .trim()
+      .split(/[\s#,]+/)
+      .filter(Boolean)
+      .map((t) => t.toLowerCase())
+      .join(",");
+    if (tag) return { mode: "tag", tag };
+  }
+
+  if (VIDEO_ID_RE.test(q) && !q.includes(" ")) {
+    return { mode: "video", id: q };
+  }
+
+  if (USERNAME_RE.test(q) && !q.includes(" ")) {
+    return { mode: "maybe_user", username: q, fallback: q };
+  }
+
+  return { mode: "search", query: q };
+}
+
+// ---- settings UI (apiVersion 6) ------------------------------------------
+
+export async function settingsStatus() {
+  if (!hasCredentials()) {
+    return { linked: "Sin cuenta (catálogo público)" };
+  }
+  try {
+    const token = await getToken();
+    if (token) {
+      return { linked: "Sesión activa · " + String(cfg("email")).slice(0, 40) };
+    }
+  } catch (e) {
+    return { linked: "Error: " + (e.message || "no se pudo iniciar sesión") };
+  }
+  return { linked: "Sin sesión" };
+}
+
+export async function action(key) {
+  if (key === "logout") {
+    try {
+      kino.storage.remove(tokenKey());
+    } catch (_) {}
+    return {
+      message: "Sesión cerrada",
+      clearSettings: ["email", "password"],
+    };
+  }
+  return { message: "Listo" };
+}
+
+// ---- search / home / browse / resolve ------------------------------------
+
 export async function search(query) {
   const raw = (query.q || "").trim();
   if (!raw) return [];
 
   const page = query.cursor ? parseInt(query.cursor, 10) || 0 : 0;
   const limit = 24;
+  const sort = cfg("sort", "relevance");
+  const parsed = parseQuery(raw);
 
-  let maybeId = raw;
-  const urlMatch = raw.match(/iwara\.(?:tv|ai)\/video\/([a-zA-Z0-9]+)/i);
-  if (urlMatch) maybeId = urlMatch[1];
-
-  if (VIDEO_ID_RE.test(maybeId) && !raw.includes(" ") && page === 0) {
+  if (parsed.mode === "video" && page === 0) {
     try {
-      const video = await apiGet("/video/" + encodeURIComponent(maybeId));
+      const video = await apiGet("/video/" + encodeURIComponent(parsed.id));
       if (video && video.id && !video.message) {
         const item = toItem(video);
         return item ? [item] : [];
@@ -97,17 +286,27 @@ export async function search(query) {
     } catch (_) {}
   }
 
-  let tag = null;
-  if (raw.toLowerCase().startsWith("tag:")) {
-    tag = raw.slice(4).trim();
-  } else if (raw.startsWith("#")) {
-    tag = raw.slice(1).trim();
+  if (parsed.mode === "user" || parsed.mode === "maybe_user") {
+    try {
+      const user = await resolveUserId(parsed.username);
+      if (user) {
+        const result = await videosByUser(user.id, page, limit);
+        if (Array.isArray(result) ? result.length : result.items.length) {
+          return result;
+        }
+      }
+    } catch (e) {
+      log("user search", parsed.username, e.message || e);
+    }
+    if (parsed.mode === "user") {
+      return page === 0 ? [] : { items: [], next: undefined };
+    }
   }
 
-  if (tag) {
+  if (parsed.mode === "tag") {
     const data = await apiGet("/videos", {
-      tags: tag.replace(/\s+/g, "_").toLowerCase(),
-      sort: "trending",
+      tags: parsed.tag,
+      sort: sort === "relevance" ? "trending" : sort,
       rating: "all",
       page,
       limit,
@@ -118,10 +317,20 @@ export async function search(query) {
     return next ? { items, next } : items;
   }
 
+  const searchQuery =
+    parsed.mode === "search"
+      ? parsed.query
+      : parsed.mode === "maybe_user"
+        ? parsed.fallback
+        : raw;
+
   const data = await apiGet("/search", {
     type: "videos",
-    query: raw,
-    sort: "relevance",
+    query: searchQuery,
+    sort:
+      sort === "relevance" || sort === "date" || sort === "views" || sort === "likes"
+        ? sort
+        : "relevance",
     page,
     limit,
   });
@@ -134,6 +343,23 @@ export async function search(query) {
 
 export async function home() {
   const rows = [];
+
+  if (hasCredentials()) {
+    try {
+      const items = await listVideos({ sort: "date", subscribed: "true" });
+      if (items.length) {
+        rows.push({
+          id: "subscribed",
+          title: "Tus suscripciones",
+          items,
+          ref: "subscribed",
+        });
+      }
+    } catch (e) {
+      log("home subscribed", e.message || e);
+    }
+  }
+
   const sorts = [
     { id: "trending", title: "Tendencias", sort: "trending" },
     { id: "date", title: "Más recientes", sort: "date" },
@@ -167,13 +393,24 @@ export async function browse(ref, cursor) {
     limit: 24,
   };
 
-  if (ref && ref.startsWith("sort:")) {
+  if (ref === "subscribed") {
+    params.subscribed = "true";
+    params.sort = "date";
+  } else if (ref && ref.startsWith("sort:")) {
     params.sort = ref.slice(5);
+  } else if (ref && ref.startsWith("user:")) {
+    params.user = ref.slice(5);
+    params.sort = "date";
+  } else if (ref && ref.startsWith("tag:")) {
+    params.tags = ref.slice(4);
+    params.sort = "trending";
   } else {
     params.sort = "date";
   }
 
-  const data = await apiGet("/videos", params);
+  const data = await apiGet("/videos", params, {
+    requireAuth: ref === "subscribed",
+  });
   const results = data.results || [];
   const items = results.map(toItem).filter(Boolean);
   const next = results.length >= 24 ? pageCursor(page) : undefined;
@@ -184,10 +421,18 @@ export async function resolve(ref) {
   const videoId = String(ref || "").trim();
   if (!videoId) throw kino.error("not_found", "ID vacío");
 
-  const video = await apiGet("/video/" + encodeURIComponent(videoId));
+  const video = await apiGet("/video/" + encodeURIComponent(videoId), null, {
+    requireAuth: false,
+  });
 
   if (video.message === "errors.privateVideo") {
-    throw kino.error("auth_required", "Vídeo privado");
+    if (!hasCredentials()) {
+      throw kino.error(
+        "auth_required",
+        "Vídeo privado: configura tu cuenta de Iwara en Ajustes"
+      );
+    }
+    throw kino.error("auth_required", "Vídeo privado o sin permiso");
   }
   if (video.message === "errors.notFound") {
     throw kino.error("not_found", "Vídeo no encontrado");
@@ -225,15 +470,25 @@ export async function resolve(ref) {
     fileId + "_" + expires + "_" + X_VERSION_KEY
   );
 
+  let token = null;
+  try {
+    token = await getToken();
+  } catch (_) {
+    token = null;
+  }
+
   const sourcesRes = await kino.fetch(fileUrl, {
     headers: {
-      ...HEADERS,
+      ...authHeaders(token),
       "X-Version": xVersion,
     },
   });
 
   if (!sourcesRes.ok) {
-    throw kino.error("unavailable", "No se obtuvieron fuentes (" + sourcesRes.status + ")");
+    throw kino.error(
+      "unavailable",
+      "No se obtuvieron fuentes (" + sourcesRes.status + ")"
+    );
   }
 
   let sources;
@@ -247,10 +502,24 @@ export async function resolve(ref) {
     throw kino.error("unavailable", "Sin calidades disponibles");
   }
 
-  const rank = { Source: 4, "540": 3, "360": 2, preview: 1 };
-  sources.sort((a, b) => (rank[b.name] || 0) - (rank[a.name] || 0));
+  const preferred = String(cfg("quality", "source")).toLowerCase();
+  const rank = { source: 4, "540": 3, "360": 2, preview: 1 };
+  const preferredRank = rank[preferred] || 4;
 
-  const best = sources.find((s) => s.src && (s.src.view || s.src.download));
+  sources.sort((a, b) => {
+    const ra = rank[String(a.name || "").toLowerCase()] || 0;
+    const rb = rank[String(b.name || "").toLowerCase()] || 0;
+    return rb - ra;
+  });
+
+  let best =
+    sources.find((s) => String(s.name || "").toLowerCase() === preferred) ||
+    sources.find((s) => {
+      const r = rank[String(s.name || "").toLowerCase()] || 0;
+      return r > 0 && r <= preferredRank && s.src && (s.src.view || s.src.download);
+    }) ||
+    sources.find((s) => s.src && (s.src.view || s.src.download));
+
   if (!best) throw kino.error("unavailable", "Sin URL de reproducción");
 
   let playUrl = best.src.download || best.src.view;

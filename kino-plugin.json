@@ -1,11 +1,13 @@
 {
   "id": "iwara-tv",
   "name": "Iwara",
-  "version": "1.2.0",
+  "version": "1.4.0",
   "apiVersion": 6,
   "entry": "plugin.js",
-  "description": "Videos de iwara.tv. Búsqueda, Inicio (tendencias, recientes, populares) y reproducción.",
+  "description": "Videos de iwara.tv. Búsqueda por título, artista o tag, Inicio, calidad configurable, descargas y sesión opcional para vídeos privados y suscripciones.",
   "author": "comunidad",
+  "homepage": "https://github.com/yumehotaru41-rgb/kino-plugin-iwara-",
+  "icon": "icon.png",
   "discoverable": false,
   "hosts": [
     "api.iwara.tv",
@@ -14,11 +16,71 @@
     "www.iwara.tv",
     "*.iwara.tv"
   ],
-  "capabilities": ["search", "home", "browse", "resolve"],
+  "capabilities": ["search", "home", "browse", "resolve", "download"],
   "categories": ["anime", "adult"],
   "color": "#7B2CBF",
   "theme": {
     "accent": "#7B2CBF",
     "onAccent": "#FFFFFF"
-  }
+  },
+  "settings": [
+    {
+      "key": "cuenta",
+      "label": "Cuenta de Iwara",
+      "type": "section",
+      "hint": "Opcional. Sin cuenta ves el catálogo público. Con usuario y contraseña puedes abrir vídeos privados y ver tus suscripciones en Inicio."
+    },
+    {
+      "key": "email",
+      "label": "Correo o usuario",
+      "type": "text",
+      "hint": "El mismo con el que entras en iwara.tv"
+    },
+    {
+      "key": "password",
+      "label": "Contraseña",
+      "type": "password"
+    },
+    {
+      "key": "linked",
+      "label": "Estado de la sesión",
+      "type": "status"
+    },
+    {
+      "key": "logout",
+      "label": "Cerrar sesión",
+      "type": "action",
+      "confirm": "¿Cerrar la sesión de Iwara en este aparato?"
+    },
+    {
+      "key": "reproduccion",
+      "label": "Reproducción",
+      "type": "section",
+      "hint": "Calidad y orden de los resultados de búsqueda."
+    },
+    {
+      "key": "quality",
+      "label": "Calidad de vídeo",
+      "type": "select",
+      "default": "source",
+      "hint": "Source es la máxima. Si no hay, se usa la siguiente disponible.",
+      "options": [
+        { "value": "source", "label": "Source (máxima)" },
+        { "value": "540", "label": "540p" },
+        { "value": "360", "label": "360p (ahorro de datos)" }
+      ]
+    },
+    {
+      "key": "sort",
+      "label": "Orden de búsqueda",
+      "type": "select",
+      "default": "relevance",
+      "options": [
+        { "value": "relevance", "label": "Relevancia" },
+        { "value": "date", "label": "Más recientes" },
+        { "value": "views", "label": "Más vistos" },
+        { "value": "likes", "label": "Más valorados" }
+      ]
+    }
+  ]
 }
